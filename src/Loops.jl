@@ -11,12 +11,16 @@ import ._TOP_MOD:     # Base definitions
     Vector, BitSet, IdDict, IdSet, UnitRange, Csize_t, Callable, ∪, ⊆, ∩, :, ∈, ∉, =>,
     in, length, get, first, last, haskey, keys, get!, isempty, isassigned,
     pop!, push!, pushfirst!, empty!, delete!, max, min, enumerate, unwrap_unionall,
-    ismutabletype, collect
+    ismutabletype, collect, iterate, <=, >=, ones, pairs, resize!, copy!, @show, fill!,
+    sort!, Iterators
 
 import Core.Compiler: # Core.Compiler specific definitions
-    IRCode, construct_domtree, dominates
+    IRCode, construct_domtree, dominates, block_for_inst, StmtRange, BasicBlock, CFG, ssamap,
+    PhiNode, GotoNode, GotoIfNot, isexpr, SSAValue, LineInfoNode, NoCallInfo, cfg_insert_edge!
 
 include(x) = _TOP_MOD.include(@__MODULE__, x)
+
+include("ir.jl")
 
 struct LoopInfo
     header::Int
@@ -82,5 +86,9 @@ function construct_loopinfo(ir::IRCode, domtree=construct_domtree(ir.cfg.blocks)
     # TODO: Loop nesting/Control tree
     return loops 
 end
+
+# TODO: 
+# - https://nbviewer.org/gist/tkf/d4734be24d2694a3afd669f8f50e6b0f/00_notebook.ipynb
+
 
 end # module Loops

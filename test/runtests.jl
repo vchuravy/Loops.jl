@@ -19,3 +19,7 @@ let (ir, rt) = only(Base.code_ircode(f1, (Vector{Float64}, Float64), optimize_un
     @test length(LI.latches) == 1
     @test all(BB -> BB ∈ LI.blocks, LI.latches) 
 end
+
+@testset "CFG" begin
+    include("ir.jl")
+end
