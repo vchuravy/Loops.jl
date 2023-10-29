@@ -12,11 +12,12 @@ import ._TOP_MOD:     # Base definitions
     in, length, get, first, last, haskey, keys, get!, isempty, isassigned,
     pop!, push!, pushfirst!, empty!, delete!, max, min, enumerate, unwrap_unionall,
     ismutabletype, collect, iterate, <=, >=, ones, pairs, resize!, copy!, @show, fill!,
-    sort!, Iterators
+    sort!, Iterators, isless, findfirst
 
 import Core.Compiler: # Core.Compiler specific definitions
     IRCode, construct_domtree, dominates, block_for_inst, StmtRange, BasicBlock, CFG, ssamap,
-    PhiNode, GotoNode, GotoIfNot, isexpr, SSAValue, LineInfoNode, NoCallInfo, cfg_insert_edge!
+    PhiNode, GotoNode, GotoIfNot, isexpr, SSAValue, LineInfoNode, NoCallInfo, cfg_insert_edge!,
+    NewNodeInfo
 
 include(x) = _TOP_MOD.include(@__MODULE__, x)
 

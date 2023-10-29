@@ -1,10 +1,9 @@
 import Core.Compiler
 import Loops: split_positions, inserted_blocks, allocate_goto_sequence!
-import Core.Compiler: BasicBlock, CFG, GotoNode, GotoIfNot
+import Core.Compiler: BasicBlock, CFG, GotoNode, GotoIfNot, NewNodeInfo
 
 function verify_ircode(ir)
     Compiler.verify_ir(ir)
-    @show ir.linetable
     Compiler.verify_linetable(ir.linetable)
 end
 
@@ -107,7 +106,7 @@ Output:
     @test length(ir0.stmts) == 3
 
     ir = Compiler.copy(ir0)
-    info = Loops.allocate_goto_sequence!(ir, [2=>0])
+    info = allocate_goto_sequence!(ir, [2=>0])
     verify_ircode(ir)
 
     @test inserted_block_ranges(info) == [1:2]
@@ -164,4 +163,139 @@ Output:
     @test ir.stmts.inst[last(b2.stmts)] == GotoIfNot(false, 4)
     @test ir.stmts.inst[last(b3.stmts)] == GotoNode(4)
     check_linetable(ir, ir0, info)
+end
+
+#=
+Input:
+    #1                 _
+        %1 = $inst1     `-- split before %1 and insert one block
+        goto #2
+    #2
+        %3 = $inst2    _
+        return %3       `-- split before %4 (`return %3`) and insert one block
+Output:
+    #1
+        goto #2
+    #2
+        goto #3
+    #3
+        %1 = $inst1
+        goto #4
+    #4
+        %5 = $inst2
+        goto #5
+    #5
+        goto #6
+    #6
+        return %5
+This transformation is testing inserting multiple basic blocks at once.  It also tests that
+inserting at boundary locations work.
+=#
+@testset "Insert two more blocks to a two-block IR" begin
+    ir0, rt = only(Base.code_ircode(single_block, (Float64,), optimize_until = "compact 1"))
+    @test length(ir0.stmts) == 3
+    @testset "Split a block in two" begin
+        info = allocate_goto_sequence!(ir0, [2 => 0])
+        verify_ircode(ir0)
+        @test inserted_block_ranges(info) == [1:2]
+    end
+
+    ir = Compiler.copy(ir0)
+    info = allocate_goto_sequence!(ir, [1 => 1, 4 => 1])
+    @test length(ir.stmts) == 8
+    @test inserted_block_ranges(info) == [1:3, 4:6]
+    verify_ircode(ir)
+    @test ir.cfg == CFG(
+        [
+            BasicBlock(Compiler.StmtRange(1, 1), Int[], [2])
+            BasicBlock(Compiler.StmtRange(2, 2), [1], [3])
+            BasicBlock(Compiler.StmtRange(3, 4), [2], [4])
+            BasicBlock(Compiler.StmtRange(5, 6), [3], [5])
+            BasicBlock(Compiler.StmtRange(7, 7), [4], [6])
+            BasicBlock(Compiler.StmtRange(8, 8), [5], Int[])
+        ],
+        [2, 3, 5, 7, 8],
+    )
+    @test [ir.stmts.inst[last(b.stmts)] for b in ir.cfg.blocks[1:end-1]] == GotoNode.(2:6)
+    check_linetable(ir, ir0, info)
+end
+
+#=
+Input:
+    #1
+        %1 = $inst1
+        %3 = new_instruction()   _
+        %2 = $inst2               `-- split before %2
+        return %2
+Output:
+    #1
+        %1 = $inst1
+        %2 = new_instruction()     # in the pre-split-point BB
+        goto #2
+    #2
+        %4 = $inst2
+        return %4
+=#
+@testset "Split a block of a pre-compact IR (attach before)" begin
+    ir0, rt = only(Base.code_ircode(single_block, (Float64,), optimize_until = "compact 1"))
+    @test length(ir0.stmts) == 3
+    st = Expr(:call, :new_instruction)
+    Compiler.insert_node!(ir0, 2, Compiler.NewInstruction(st, Any))
+
+    ir = Compiler.copy(ir0)
+    info = allocate_branches!(ir, [2 => 0])
+    @test inserted_block_ranges(info) == [1:2]
+    verify_ircode(ir)
+    check_linetable(ir, ir0, info)
+
+    ir = Core.Compiler.compact!(ir)
+    verify_ircode(ir)
+    @test ir.cfg == CFG(
+        [
+            BasicBlock(Compiler.StmtRange(1, 3), Int[], [2])
+            BasicBlock(Compiler.StmtRange(4, 5), [1], Int[])
+        ],
+        [4],
+    )
+    @test ir.stmts[2][:inst] == st
+end
+
+#=
+Input:
+    #1
+        %1 = $inst1              _
+        %2 = $inst2               `-- split before %2
+        %3 = new_instruction()
+        return %2
+Output:
+    #1
+        %1 = $inst1
+        goto #2
+    #2
+        %3 = $inst2
+        %4 = new_instruction()     # in the post-split-point BB
+        return %3
+=#
+@testset "Split a block of a pre-compact IR (attach after)" begin
+    ir0, rt = only(Base.code_ircode(single_block, (Float64,), optimize_until = "compact 1"))
+    @test length(ir0.stmts) == 3
+    st = Expr(:call, :new_instruction)
+    Compiler.insert_node!(ir0, 2, Compiler.NewInstruction(st, Any), true)
+
+    ir = Compiler.copy(ir0)
+    info = allocate_branches!(ir, [2 => 0])
+    @test inserted_block_ranges(info) == [1:2]
+    verify_ircode(ir)
+    check_linetable(ir, ir0, info)
+
+    ir = Core.Compiler.compact!(ir)
+    verify_ircode(ir)
+    @test ir.cfg == CFG(
+        [
+            BasicBlock(Compiler.StmtRange(1, 2), Int[], [2])
+            BasicBlock(Compiler.StmtRange(3, 5), [1], Int[])
+        ],
+        [3],
+    )
+    @test ir.stmts[4][:inst] == st
 end
