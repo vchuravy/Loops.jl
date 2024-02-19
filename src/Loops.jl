@@ -13,7 +13,7 @@ import ._TOP_MOD:     # Base definitions
     pop!, push!, pushfirst!, empty!, delete!, max, min, enumerate, unwrap_unionall,
     ismutabletype, collect, iterate, <=, >=, ones, pairs, 
     resize!, copy!, @show, fill!,
-    sort!, Iterators, isless, findfirst, filter, map!, map
+    sort!, Iterators, isless, findfirst, filter, map!, map, @info
 
 import Core.Compiler: # Core.Compiler specific definitions
     IRCode, construct_domtree, dominates, block_for_inst, StmtRange, BasicBlock, CFG, ssamap,
@@ -24,10 +24,37 @@ include(x) = _TOP_MOD.include(@__MODULE__, x)
 
 include("ir.jl")
 
-struct LoopInfo
+struct Loop
     header::Int
     latches::Vector{Int}
     blocks::Vector{Int}
+end
+
+struct LoopInfo
+    parent::Union{Nothing, LoopInfo}
+    loops::Vector{LoopInfo}
+end
+
+"""
+    update!(LI::Loop)
+"""
+function update!(L::Loop, changemap::IdDict{Int, Union{Int, Tuple{Int,Int}}})
+    header = changemap[L.header]
+    @assert header isa Int
+    map!(BB->bbchangemap[BB], L.latches, L.latches)
+    new_blocks = Vector[]
+    for (i, BB) in enumerate(L.blocks)
+        if haskey(changemap, BB)
+            newBB = changemap[BB]
+            if newBB isa Tuple
+                newBB, other = newBB
+                push!(new_blocks, other)
+            end
+            L.blocks[i] = newBB
+        end
+    end
+    append!(LI.blocks, new_blocks)
+    return Loop(header, LI.latches, LI.blocks)
 end
 
 function construct_loopinfo(ir::IRCode, domtree=construct_domtree(ir.cfg.blocks))
@@ -70,7 +97,7 @@ function construct_loopinfo(ir::IRCode, domtree=construct_domtree(ir.cfg.blocks)
 
         blocks = collect(visited)
         # Assume sorted in CFG order
-        loops[h] = LoopInfo(h, latches, blocks)
+        loops[h] = Loop(h, latches, blocks)
     end
 
     # Find exiting and exit blocks 
@@ -90,7 +117,7 @@ function construct_loopinfo(ir::IRCode, domtree=construct_domtree(ir.cfg.blocks)
 end
 
 function invariant(ir, LI, invariant_stmts, stmt)
-    if stmt isa Argument || stmt isa GlobalRef || stmt isa QuoteNode || stmt isa Bool
+    if stmt isa Argument || stmt isa GlobalRef || Core.Compiler.is_self_quoting(stmt) || stmt isa QuoteNode
         return true
     elseif stmt isa SSAValue
         id = stmt.id
@@ -109,13 +136,13 @@ function invariant_expr(ir, LI, invariant_stmts, stmt)
     #     invar &= invariant(ir, LI, invariant_stmts, useref[])
     # end
     state = Core.Compiler.iterate(Core.Compiler.userefs(stmt))
-	while state !== nothing
-		useref, next  = state
+    while state !== nothing
+        useref, next  = state
 
-		invar &= invariant(ir, LI, invariant_stmts, Core.Compiler.getindex(useref))
-		
-		state = Core.Compiler.iterate(Core.Compiler.userefs(stmt), next)
-	end
+        invar &= invariant(ir, LI, invariant_stmts, Core.Compiler.getindex(useref))
+
+        state = Core.Compiler.iterate(Core.Compiler.userefs(stmt), next)
+    end
     return invar
 end
 
@@ -127,76 +154,97 @@ function invariant_stmt(ir, loop, invariant_stmts, stmt)
 end
 
 function find_invariant_stmts(ir, LI)
-	stmts = Int[]
-	for BB in LI.blocks
-		for stmt in ir.cfg.blocks[BB].stmts
-			# Okay to throw
-			if (ir.stmts[stmt][:flag] & IR_FLAG_EFFECT_FREE) != 0
-				# Check if stmt is invariant
-				if invariant_stmt(ir, LI, stmts, ir.stmts[stmt][:inst])
-					push!(stmts, stmt)
-				end
-			end
-		end
-	end
-	return stmts
+    stmts = Int[]
+    for BB in LI.blocks
+        for stmt in ir.cfg.blocks[BB].stmts
+            # Okay to throw
+            if (ir.stmts[stmt][:flag] & IR_FLAG_EFFECT_FREE) != 0
+                # Check if stmt is invariant
+                if invariant_stmt(ir, LI, stmts, ir.stmts[stmt][:inst])
+                    push!(stmts, stmt)
+                end
+            end
+        end
+    end
+    return stmts
 end
 
 function insert_preheader!(ir, LI)
-	header = LI.header
-	preds = ir.cfg.blocks[header].preds
-	entering = filter(BB->BB ∉ LI.blocks, preds)
+    header = LI.header
+    preds = ir.cfg.blocks[header].preds
+    entering = filter(BB->BB ∉ LI.blocks, preds)
 
-	# split the header
-	split = first(ir.cfg.blocks[header].stmts)
-	info = allocate_goto_sequence!(ir, [split => 0])
+    # split the header
+    split = first(ir.cfg.blocks[header].stmts)
+    info = allocate_goto_sequence!(ir, [split => 0])
 
-	map!(BB->info.bbchangemap[BB], entering, entering)
+    map!(BB->info.bbchangemap[BB], entering, entering)
 
-	preheader = header
-	header = info.bbchangemap[header]
+    preheader = header
+    header = info.bbchangemap[header]
 
-	on_phi_label(i) = i ∈ entering ? preheader : i
+    on_phi_label(i) = i ∈ entering ? preheader : i
 
-	for stmt in ir.cfg.blocks[header].stmts
-		inst = ir.stmts[stmt][:inst]
-		if inst isa PhiNode
+    for stmt in ir.cfg.blocks[header].stmts
+        inst = ir.stmts[stmt][:inst]
+        if inst isa PhiNode
             edges = inst.edges::Vector{Int32}
             for i in 1:length(edges)
                 edges[i] = on_phi_label(edges[i])
             end
-		else
-			continue
-		end
-	end
+        else
+            continue
+        end
+    end
 
-	# TODO: should we mutate LI instead?
-	blocks = map(BB->info.bbchangemap[BB], LI.blocks)
-	latches = map(BB->info.bbchangemap[BB], LI.latches)
+    # TODO: should we mutate LI instead?
+    blocks = map(BB->info.bbchangemap[BB], LI.blocks)
+    latches = map(BB->info.bbchangemap[BB], LI.latches)
 
-	for latch in latches
-		cfg_delete_edge!(ir.cfg, latch, preheader)
-		cfg_insert_edge!(ir.cfg, latch, header)
-		stmt = ir.stmts[last(ir.cfg.blocks[4].stmts)]
-		# stmt[:inst] = GotoNode(header)
+    for latch in latches
+        cfg_delete_edge!(ir.cfg, latch, preheader)
+        cfg_insert_edge!(ir.cfg, latch, header)
+        stmt = ir.stmts[last(ir.cfg.blocks[4].stmts)]
+        # stmt[:inst] = GotoNode(header)
         Compiler.setindex!(stmt, Compiler.GotoNode(header), :inst)
-	end
+    end
 
-	Compiler.verify_ir(ir)
+    Compiler.verify_ir(ir)
 
-	return preheader, LoopInfo(header, latches, blocks)
+    return preheader, LoopInfo(header, latches, blocks)
 end
 
 function move_invariant!(ir, preheader, LI)
-	insertion_point = last(ir.cfg.blocks[preheader].stmts)
-	stmts = find_invariant_stmts(ir, LI)
-	inserter = InsertBefore(ir, SSAValue(insertion_point))
-	for stmt in stmts
-		new_stmt = inserter(NewInstruction(ir.stmts[stmt]))
-		# ir.stmts[stmt] = new_stmt
+    insertion_point = last(ir.cfg.blocks[preheader].stmts)
+    stmts = find_invariant_stmts(ir, LI)
+    inserter = InsertBefore(ir, SSAValue(insertion_point))
+    stmt_map = IdDict{SSAValue, SSAValue}()
+    function fixup(inst::NewInstruction)
+        # for useref in userefs(inst)
+        #     if haskey(stmt_map, useref[])
+        #         useref[] = stmt_map[useref[]]
+        #     end
+        # end
+        UR = Core.Compiler.userefs(inst.stmt)
+        state = Core.Compiler.iterate(UR)
+        while state !== nothing
+            useref, next  = state
+
+            if haskey(stmt_map, Core.Compiler.getindex(useref))
+                Core.Compiler.setindex!(useref, stmt_map[Core.Compiler.getindex(useref)])
+            end
+            
+            state = Core.Compiler.iterate(UR, next)
+        end
+        return inst
+    end
+    for stmt in stmts
+        new_stmt = inserter(fixup(NewInstruction(ir.stmts[stmt])))
+        stmt_map[SSAValue(stmt)] = new_stmt
+        # ir.stmts[stmt] = new_stmt
         Core.Compiler.setindex!(
-			ir.stmts, new_stmt, stmt)
-	end
+            ir.stmts, new_stmt, stmt)
+    end
 
 end
 
