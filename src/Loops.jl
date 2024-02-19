@@ -24,10 +24,37 @@ include(x) = _TOP_MOD.include(@__MODULE__, x)
 
 include("ir.jl")
 
-struct LoopInfo
+struct Loop
     header::Int
     latches::Vector{Int}
     blocks::Vector{Int}
+end
+
+struct LoopInfo
+    parent::Union{Nothing, LoopInfo}
+    loops::Vector{LoopInfo}
+end
+
+"""
+    update!(LI::Loop)
+"""
+function update!(L::Loop, changemap::IdDict{Int, Union{Int, Tuple{Int,Int}}})
+    header = changemap[L.header]
+    @assert header isa Int
+    map!(BB->bbchangemap[BB], L.latches, L.latches)
+    new_blocks = Vector[]
+    for (i, BB) in enumerate(L.blocks)
+        if haskey(changemap, BB)
+            newBB = changemap[BB]
+            if newBB isa Tuple
+                newBB, other = newBB
+                push!(new_blocks, other)
+            end
+            L.blocks[i] = newBB
+        end
+    end
+    append!(LI.blocks, new_blocks)
+    return Loop(header, LI.latches, LI.blocks)
 end
 
 function construct_loopinfo(ir::IRCode, domtree=construct_domtree(ir.cfg.blocks))
@@ -70,7 +97,7 @@ function construct_loopinfo(ir::IRCode, domtree=construct_domtree(ir.cfg.blocks)
 
         blocks = collect(visited)
         # Assume sorted in CFG order
-        loops[h] = LoopInfo(h, latches, blocks)
+        loops[h] = Loop(h, latches, blocks)
     end
 
     # Find exiting and exit blocks 
